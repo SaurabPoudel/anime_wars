@@ -3,7 +3,7 @@ import json
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from sqlalchemy import _or, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Base, SessionLocal, engine, get_db
@@ -13,6 +13,11 @@ from app.schemas import (
     CharacterUpdate,
     CharacterResponse,
 )
+
+
+from app.battle_engine import simulate_battle
+from app.schemas import BattleRequest
+
 
 
 BUILT_IN_CHARACTERS = [
@@ -348,3 +353,44 @@ async def list_characters(
     characters = result.scalars().all()
 
     return [to_response(character) for character in characters]
+
+
+
+@app.post("/battles")
+async def create_battle(
+    request: BattleRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    if request.fighter1_id == request.fighter2_id:
+        raise HTTPException(
+            status_code=400,
+            detail="A character cannot battle itself",
+        )
+
+    result = await db.execute(
+        select(Character).where(
+            Character.id.in_(
+                [request.fighter1_id, request.fighter2_id]
+            )
+        )
+    )
+
+    characters = {
+        character.id: character
+        for character in result.scalars().all()
+    }
+
+    fighter1 = characters.get(request.fighter1_id)
+    fighter2 = characters.get(request.fighter2_id)
+
+    if fighter1 is None or fighter2 is None:
+        raise HTTPException(
+            status_code=404,
+            detail="One or both characters were not found",
+        )
+
+    return simulate_battle(
+        to_response(fighter1),
+        to_response(fighter2),
+        seed=request.seed,
+    )

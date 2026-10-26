@@ -27,3 +27,9 @@ class CharacterUpdate(BaseModel):
 class CharacterResponse(CharacterCreate):
     id: int
     source:  str
+
+
+class BattleRequest(BaseModel):
+    fighter1_id: int = Field(gt=0)
+    fighter2_id: int = Field(gt=0)
+    seed: int | None = None
