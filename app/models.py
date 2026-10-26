@@ -93,3 +93,112 @@ class Battle(Base):
         String,
         nullable=False,
     )
+
+
+
+class Team(Base):
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        unique=True,
+    )
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    team_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    character_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+
+
+class TeamBattle(Base):
+    __tablename__ = "team_battles"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    team1_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    team2_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    winner_team_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    seed: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    total_turns: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    result_json: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )
+
+
+
+class Tournament(Base):
+    __tablename__ = "tournaments"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    seed: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    champion_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    result_json: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )

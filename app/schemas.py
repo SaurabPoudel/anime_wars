@@ -33,3 +33,24 @@ class BattleRequest(BaseModel):
     fighter1_id: int = Field(gt=0)
     fighter2_id: int = Field(gt=0)
     seed: int | None = None
+
+
+class TeamCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+
+
+class TeamMemberCreate(BaseModel):
+    character_id: int = Field(gt=0)
+
+
+
+class TeamBattleRequest(BaseModel):
+    team1_id: int = Field(gt=0)
+    team2_id: int = Field(gt=0)
+    seed: int | None = None
+
+
+class TournamentCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    seed: int | None = None
+    character_ids: list[int] | None = None

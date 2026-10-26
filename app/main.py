@@ -1,18 +1,25 @@
 
 import json
 from contextlib import asynccontextmanager
+import random
+
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Base, SessionLocal, engine, get_db
-from app.models import Character, Character 
+from app.models import Battle, Character, Team, TeamMember, TeamBattle, Tournament
 from app.schemas import (
     CharacterCreate,
     CharacterUpdate,
     CharacterResponse,
+    TeamCreate,
+    TeamMemberCreate,
+    TeamBattleRequest,
+    TournamentCreate
 )
+from app.tournament_engine import simulate_tournament
 
 
 from app.battle_engine import simulate_battle
@@ -474,4 +481,688 @@ async def get_battle(
     return {
         "battle_id": battle.id,
         **json.loads(battle.result_json),
+    }
+
+
+@app.get("/characters/{character_id}/stats")
+async def get_character_stats(
+    character_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Character).where(Character.id == character_id)
+    )
+    character = result.scalar_one_or_none()
+
+    if character is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Character not found",
+        )
+
+    result = await db.execute(
+        select(Battle).where(
+            (Battle.fighter1_id == character_id)
+            | (Battle.fighter2_id == character_id)
+        )
+    )
+    battles = result.scalars().all()
+
+    total_battles = len(battles)
+    wins = sum(
+        battle.winner_id == character_id
+        for battle in battles
+    )
+    losses = sum(
+        battle.winner_id is not None
+        and battle.winner_id != character_id
+        for battle in battles
+    )
+    draws = total_battles - wins - losses
+
+    win_rate = (
+        round(wins / total_battles * 100, 2)
+        if total_battles
+        else 0.0
+    )
+
+    return {
+        "character_id": character.id,
+        "name": character.name,
+        "anime": character.anime,
+        "total_battles": total_battles,
+        "wins": wins,
+        "losses": losses,
+        "draws": draws,
+        "win_rate": win_rate,
+    }
+
+
+
+@app.get("/leaderboard")
+async def get_leaderboard(
+    limit: int = 10,
+    db: AsyncSession = Depends(get_db),
+):
+    if not 1 <= limit <= 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100",
+        )
+
+    result = await db.execute(
+        select(Character).order_by(Character.id.asc())
+    )
+    characters = result.scalars().all()
+
+    result = await db.execute(select(Battle))
+    battles = result.scalars().all()
+
+    rankings = []
+
+    for character in characters:
+        character_battles = [
+            battle
+            for battle in battles
+            if (
+                battle.fighter1_id == character.id
+                or battle.fighter2_id == character.id
+            )
+        ]
+
+        total = len(character_battles)
+        wins = sum(
+            battle.winner_id == character.id
+            for battle in character_battles
+        )
+
+        losses = sum(
+            battle.winner_id is not None
+            and battle.winner_id != character.id
+            for battle in character_battles
+        )
+
+        draws = total - wins - losses
+
+        win_rate = (
+            round(wins / total * 100, 2)
+            if total
+            else 0.0
+        )
+
+        rankings.append(
+            {
+                "character_id": character.id,
+                "name": character.name,
+                "anime": character.anime,
+                "total_battles": total,
+                "wins": wins,
+                "losses": losses,
+                "draws": draws,
+                "win_rate": win_rate,
+            }
+        )
+
+    rankings.sort(
+        key=lambda item: (
+            item["wins"],
+            item["win_rate"],
+            item["total_battles"],
+        ),
+        reverse=True,
+    )
+
+    for rank, character in enumerate(rankings, start=1):
+        character["rank"] = rank
+
+    return rankings[:limit]
+
+
+
+@app.post("/teams", status_code=201)
+async def create_team(
+    request: TeamCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    name = request.name.strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="Team name cannot be blank",
+        )
+
+    result = await db.execute(
+        select(Team).where(Team.name.ilike(name))
+    )
+
+    if result.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A team with this name already exists",
+        )
+
+    team = Team(name=name)
+    db.add(team)
+
+    await db.commit()
+    await db.refresh(team)
+
+    return {
+        "id": team.id,
+        "name": team.name,
+        "members": [],
+    }
+
+
+@app.post("/teams/{team_id}/members", status_code=201)
+async def add_team_member(
+    team_id: int,
+    request: TeamMemberCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Team).where(Team.id == team_id)
+    )
+    team = result.scalar_one_or_none()
+
+    if team is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Team not found",
+        )
+
+    result = await db.execute(
+        select(Character).where(
+            Character.id == request.character_id
+        )
+    )
+    character = result.scalar_one_or_none()
+
+    if character is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Character not found",
+        )
+
+    result = await db.execute(
+        select(TeamMember).where(
+            TeamMember.team_id == team_id,
+            TeamMember.character_id == request.character_id,
+        )
+    )
+
+    if result.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Character is already in this team",
+        )
+
+    member = TeamMember(
+        team_id=team_id,
+        character_id=request.character_id,
+    )
+
+    db.add(member)
+    await db.commit()
+
+    return {
+        "message": f"{character.name} added to {team.name}",
+        "team_id": team_id,
+        "character_id": character.id,
+    }
+
+
+@app.get("/teams/{team_id}")
+async def get_team(
+    team_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Team).where(Team.id == team_id)
+    )
+    team = result.scalar_one_or_none()
+
+    if team is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Team not found",
+        )
+
+    result = await db.execute(
+        select(Character)
+        .join(
+            TeamMember,
+            TeamMember.character_id == Character.id,
+        )
+        .where(TeamMember.team_id == team_id)
+        .order_by(Character.id)
+    )
+
+    characters = result.scalars().all()
+
+    return {
+        "id": team.id,
+        "name": team.name,
+        "members": [
+            to_response(character).model_dump()
+            for character in characters
+        ],
+        "member_count": len(characters),
+    }
+
+
+
+@app.delete(
+    "/teams/{team_id}/members/{character_id}",
+    status_code=204,
+)
+async def remove_team_member(
+    team_id: int,
+    character_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(TeamMember).where(
+            TeamMember.team_id == team_id,
+            TeamMember.character_id == character_id,
+        )
+    )
+
+    member = result.scalar_one_or_none()
+
+    if member is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Team membership not found",
+        )
+
+    await db.delete(member)
+    await db.commit()
+
+    return None
+
+
+
+@app.get("/teams")
+async def list_teams(
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Team).order_by(Team.id)
+    )
+    teams = result.scalars().all()
+
+    output = []
+
+    for team in teams:
+        result = await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == team.id
+            )
+        )
+        members = result.scalars().all()
+
+        output.append(
+            {
+                "id": team.id,
+                "name": team.name,
+                "member_count": len(members),
+            }
+        )
+
+    return output
+
+
+@app.post("/team-battles", status_code=201)
+async def create_team_battle(
+    request: TeamBattleRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    if request.team1_id == request.team2_id:
+        raise HTTPException(
+            status_code=400,
+            detail="A team cannot battle itself",
+        )
+
+    # Find both teams.
+    result = await db.execute(
+        select(Team).where(
+            Team.id.in_([request.team1_id, request.team2_id])
+        )
+    )
+    teams = {team.id: team for team in result.scalars().all()}
+
+    team1 = teams.get(request.team1_id)
+    team2 = teams.get(request.team2_id)
+
+    if team1 is None or team2 is None:
+        raise HTTPException(
+            status_code=404,
+            detail="One or both teams were not found",
+        )
+
+    # Fetch each team's characters in a stable order.
+    async def get_team_characters(team_id: int):
+        result = await db.execute(
+            select(Character)
+            .join(
+                TeamMember,
+                TeamMember.character_id == Character.id,
+            )
+            .where(TeamMember.team_id == team_id)
+            .order_by(Character.id)
+        )
+        return [
+            to_response(character)
+            for character in result.scalars().all()
+        ]
+
+    fighters1 = await get_team_characters(team1.id)
+    fighters2 = await get_team_characters(team2.id)
+
+    if not fighters1 or not fighters2:
+        raise HTTPException(
+            status_code=400,
+            detail="Both teams must have at least one character",
+        )
+
+    if len(fighters1) != len(fighters2):
+        raise HTTPException(
+            status_code=400,
+            detail="Both teams must have the same number of characters",
+        )
+
+    # Generate a seed if the caller did not supply one.
+    battle_seed = (
+        request.seed
+        if request.seed is not None
+        else random.SystemRandom().randrange(1, 2**31 - 1)
+    )
+
+    individual_battles = []
+    team1_wins = 0
+    team2_wins = 0
+    total_turns = 0
+
+    # Pair characters by their roster order.
+    for index, (fighter1, fighter2) in enumerate(
+        zip(fighters1, fighters2)
+    ):
+        match_seed = battle_seed + index
+
+        result = simulate_battle(
+            fighter1,
+            fighter2,
+            seed=match_seed,
+        )
+
+        individual_battles.append(result)
+        total_turns += result["turns"]
+
+        if result["winner_id"] == fighter1.id:
+            team1_wins += 1
+        elif result["winner_id"] == fighter2.id:
+            team2_wins += 1
+
+    if team1_wins > team2_wins:
+        winner_team_id = team1.id
+        winner_name = team1.name
+    elif team2_wins > team1_wins:
+        winner_team_id = team2.id
+        winner_name = team2.name
+    else:
+        winner_team_id = None
+        winner_name = None
+
+    battle_result = {
+        "seed": battle_seed,
+        "team1": {
+            "id": team1.id,
+            "name": team1.name,
+            "wins": team1_wins,
+        },
+        "team2": {
+            "id": team2.id,
+            "name": team2.name,
+            "wins": team2_wins,
+        },
+        "winner_team_id": winner_team_id,
+        "winner": winner_name,
+        "individual_battles": individual_battles,
+        "total_turns": total_turns,
+    }
+
+    saved_battle = TeamBattle(
+        team1_id=team1.id,
+        team2_id=team2.id,
+        winner_team_id=winner_team_id,
+        seed=battle_seed,
+        total_turns=total_turns,
+        result_json=json.dumps(battle_result),
+    )
+
+    db.add(saved_battle)
+    await db.commit()
+    await db.refresh(saved_battle)
+
+    return {
+        "team_battle_id": saved_battle.id,
+        **battle_result,
+    }
+
+
+
+@app.get("/team-battles")
+async def list_team_battles(
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    if not 1 <= limit <= 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100",
+        )
+
+    if offset < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="offset cannot be negative",
+        )
+
+    result = await db.execute(
+        select(TeamBattle)
+        .order_by(TeamBattle.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+
+    battles = result.scalars().all()
+
+    return [
+        {
+            "team_battle_id": battle.id,
+            "team1_id": battle.team1_id,
+            "team2_id": battle.team2_id,
+            "winner_team_id": battle.winner_team_id,
+            "seed": battle.seed,
+            "total_turns": battle.total_turns,
+        }
+        for battle in battles
+    ]
+
+
+@app.get("/team-battles/{battle_id}")
+async def get_team_battle(
+    battle_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(TeamBattle).where(TeamBattle.id == battle_id)
+    )
+
+    battle = result.scalar_one_or_none()
+
+    if battle is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Team battle not found",
+        )
+
+    return {
+        "team_battle_id": battle.id,
+        **json.loads(battle.result_json),
+    }
+
+
+@app.post("/tournaments", status_code=201)
+async def create_tournament(
+    request: TournamentCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    name = request.name.strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="Tournament name cannot be blank",
+        )
+
+    if request.character_ids is not None:
+        if len(request.character_ids) != 64:
+            raise HTTPException(
+                status_code=400,
+                detail="Exactly 64 character IDs are required",
+            )
+
+        if len(set(request.character_ids)) != 64:
+            raise HTTPException(
+                status_code=400,
+                detail="Character IDs must be unique",
+            )
+
+        result = await db.execute(
+            select(Character).where(
+                Character.id.in_(request.character_ids)
+            )
+        )
+        found = {
+            character.id: character
+            for character in result.scalars().all()
+        }
+
+        if len(found) != 64:
+            raise HTTPException(
+                status_code=404,
+                detail="One or more characters were not found",
+            )
+        characters = [
+            found[character_id]
+            for character_id in request.character_ids
+        ]
+    else:
+        result = await db.execute(
+            select(Character)
+            .order_by(Character.id)
+            .limit(64)
+        )
+        characters = result.scalars().all()
+
+        if len(characters) != 64:
+            raise HTTPException(
+                status_code=400,
+                detail="At least 64 characters are required",
+            )
+
+    tournament_seed = (
+        request.seed
+        if request.seed is not None
+        else random.SystemRandom().randrange(1, 2**31 - 1)
+    )
+
+    tournament_result = simulate_tournament(
+        [to_response(character) for character in characters],
+        seed=tournament_seed,
+    )
+
+    tournament = Tournament(
+        name=name,
+        seed=tournament_seed,
+        champion_id=tournament_result["champion"]["id"],
+        result_json=json.dumps(tournament_result),
+    )
+
+    db.add(tournament)
+    await db.commit()
+    await db.refresh(tournament)
+
+    return {
+        "tournament_id": tournament.id,
+        "name": tournament.name,
+        **tournament_result,
+    }
+
+
+
+@app.get("/tournaments")
+async def list_tournaments(
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    if not 1 <= limit <= 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100",
+        )
+
+    if offset < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="offset cannot be negative",
+        )
+
+    result = await db.execute(
+        select(Tournament)
+        .order_by(Tournament.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+
+    tournaments = result.scalars().all()
+
+    return [
+        {
+            "id": tournament.id,
+            "name": tournament.name,
+            "seed": tournament.seed,
+            "champion_id": tournament.champion_id,
+        }
+        for tournament in tournaments
+    ]
+
+
+@app.get("/tournaments/{tournament_id}")
+async def get_tournament(
+    tournament_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Tournament).where(
+            Tournament.id == tournament_id
+        )
+    )
+    tournament = result.scalar_one_or_none()
+
+    if tournament is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Tournament not found",
+        )
+
+    return {
+        "tournament_id": tournament.id,
+        "name": tournament.name,
+        **json.loads(tournament.result_json),
     }
