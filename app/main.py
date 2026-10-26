@@ -3,7 +3,7 @@ import json
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import _or, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Base, SessionLocal, engine, get_db
@@ -250,3 +250,101 @@ async def delete_character(
     await db.commit()
 
     return None
+
+
+@app.get(
+    "/characters",
+    response_model=list[CharacterResponse],
+)
+async def list_characters(
+    search: str | None = None,
+    anime: str | None = None,
+    min_hp: int | None = None,
+    source: str | None = None,
+    sort_by: str = "id",
+    order: str = "asc",
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(Character)
+
+    # Search character names, anime names, and abilities
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.where(
+            or_(
+                Character.name.ilike(term),
+                Character.anime.ilike(term),
+                Character.abilities.ilike(term),
+            )
+        )
+
+    # Filter by anime universe
+    if anime:
+        query = query.where(
+            Character.anime.ilike(f"%{anime.strip()}%")
+        )
+
+    # Filter by minimum health
+    if min_hp is not None:
+        query = query.where(Character.hp >= min_hp)
+
+    # Filter built-in or user-created characters
+    if source is not None:
+        if source not in {"system", "user"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Source must be 'system' or 'user'",
+            )
+
+        query = query.where(Character.source == source)
+
+    # Allow sorting only by approved fields
+    sortable_fields = {
+        "id": Character.id,
+        "name": Character.name,
+        "hp": Character.hp,
+        "attack": Character.attack,
+        "defense": Character.defense,
+        "speed": Character.speed,
+    }
+
+    if sort_by not in sortable_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid sort_by. Choose from: {', '.join(sortable_fields)}",
+        )
+
+    if order not in {"asc", "desc"}:
+        raise HTTPException(
+            status_code=400,
+            detail="order must be 'asc' or 'desc'",
+        )
+
+    sort_column = sortable_fields[sort_by]
+
+    if order == "desc":
+        query = query.order_by(sort_column.desc())
+    else:
+        query = query.order_by(sort_column.asc())
+
+    # Pagination validation
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100",
+        )
+
+    if offset < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="offset cannot be negative",
+        )
+
+    query = query.offset(offset).limit(limit)
+
+    result = await db.execute(query)
+    characters = result.scalars().all()
+
+    return [to_response(character) for character in characters]
