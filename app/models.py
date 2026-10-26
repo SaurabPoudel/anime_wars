@@ -53,3 +53,43 @@ class Character(Base):
         nullable=False,
         default="user",
     )
+
+
+class Battle(Base):
+    __tablename__ = "battles"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    fighter1_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    fighter2_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    winner_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    seed: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    turns: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    result_json: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )

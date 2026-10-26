@@ -7,7 +7,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Base, SessionLocal, engine, get_db
-from app.models import Character
+from app.models import Character, Character 
 from app.schemas import (
     CharacterCreate,
     CharacterUpdate,
@@ -355,8 +355,7 @@ async def list_characters(
     return [to_response(character) for character in characters]
 
 
-
-@app.post("/battles")
+@app.post("/battles", status_code=201)
 async def create_battle(
     request: BattleRequest,
     db: AsyncSession = Depends(get_db),
@@ -389,8 +388,90 @@ async def create_battle(
             detail="One or both characters were not found",
         )
 
-    return simulate_battle(
+    battle_result = simulate_battle(
         to_response(fighter1),
         to_response(fighter2),
         seed=request.seed,
     )
+
+    battle = Battle(
+        fighter1_id=fighter1.id,
+        fighter2_id=fighter2.id,
+        winner_id=battle_result["winner_id"],
+        seed=request.seed,
+        turns=battle_result["turns"],
+        result_json=json.dumps(battle_result),
+    )
+
+    db.add(battle)
+    await db.commit()
+    await db.refresh(battle)
+
+    return {
+        "battle_id": battle.id,
+        **battle_result,
+    }
+
+
+
+@app.get("/battles")
+async def list_battles(
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    if not 1 <= limit <= 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100",
+        )
+
+    if offset < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="offset cannot be negative",
+        )
+
+    result = await db.execute(
+        select(Battle)
+        .order_by(Battle.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+
+    battles = result.scalars().all()
+
+    return [
+        {
+            "battle_id": battle.id,
+            "fighter1_id": battle.fighter1_id,
+            "fighter2_id": battle.fighter2_id,
+            "winner_id": battle.winner_id,
+            "seed": battle.seed,
+            "turns": battle.turns,
+        }
+        for battle in battles
+    ]
+
+
+@app.get("/battles/{battle_id}")
+async def get_battle(
+    battle_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Battle).where(Battle.id == battle_id)
+    )
+
+    battle = result.scalar_one_or_none()
+
+    if battle is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Battle not found",
+        )
+
+    return {
+        "battle_id": battle.id,
+        **json.loads(battle.result_json),
+    }
